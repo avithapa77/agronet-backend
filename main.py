@@ -1,8 +1,10 @@
 """
-main.py
+main.py — AgroNet backend, Cloud Run ready
 
-Entry point for the AgroNet backend.
-Run with:  uvicorn main:app --reload --port 8000
+Changes vs local version:
+- Reads PORT from environment (Cloud Run injects this as 8080)
+- FRONTEND_URL defaults to * so the deployed frontend can connect
+- WebSocket path is /ws — Cloud Run forwards it transparently
 """
 
 import asyncio
@@ -29,41 +31,29 @@ from routes.ai         import router as ai_router
 from routes.tasks      import router as tasks_router
 
 
-# ── Startup / shutdown ──────────────────────────────────────────
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Give the MQTT service a reference to the running event loop
-    # so its thread-based callbacks can schedule coroutines safely
     loop = asyncio.get_event_loop()
     set_event_loop(loop)
     start_mqtt()
-
-    # Push telemetry to all browsers every 3 seconds
     asyncio.create_task(telemetry_loop())
+    yield
 
-    yield  # Server is running
-
-    # Cleanup on shutdown (nothing needed for in-memory state)
-
-
-# ── App ─────────────────────────────────────────────────────────
 
 app = FastAPI(
     title="AgroNet API",
-    description="Backend for the AgroNet v4 autonomous farm management platform",
+    description="AgroNet v4 backend — Cloud Run deployment",
     version="1.0.0",
     lifespan=lifespan,
 )
 
+# CORS — allow the frontend origin (set FRONTEND_URL in Cloud Run env vars)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[os.getenv("FRONTEND_URL", "*")],
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# ── Mount routers ───────────────────────────────────────────────
 
 app.include_router(telemetry_router)
 app.include_router(dispatch_router)
@@ -74,42 +64,36 @@ app.include_router(ai_router)
 app.include_router(tasks_router)
 
 
-# ── Health check ─────────────────────────────────────────────────
-
 @app.get("/health")
 def health():
-    return {"status": "ok", "farm": os.getenv("FARM_NAME", "AgroNet"), "drone": farm_state["drone"]["status"]}
+    return {
+        "status": "ok",
+        "farm": os.getenv("FARM_NAME", "AgroNet"),
+        "drone": farm_state["drone"]["status"],
+        "instance": os.getenv("K_REVISION", "local"),  # K_REVISION is set by Cloud Run
+    }
 
-
-# ── WebSocket endpoint ───────────────────────────────────────────
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     await manager.connect(ws)
     try:
-        # Send the full farm state immediately so the UI populates on connect
         await ws.send_text(json.dumps({"type": "FULL_STATE", "payload": farm_state}))
-        # Keep the connection alive by reading (the browser rarely sends anything)
         while True:
             await ws.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(ws)
 
 
-# ── Background telemetry loop ────────────────────────────────────
-
 async def telemetry_loop():
-    """Push a TELEMETRY frame to all browser tabs every 3 seconds."""
     while True:
         await asyncio.sleep(3)
         if not manager.connections:
             continue
 
-        # Simulate slow battery drain while flying (remove once real drone is connected)
+        # Simulate battery drain (remove once real UAV-1 is connected via MQTT)
         if farm_state["drone"]["status"] in ("flying", "spraying"):
             farm_state["drone"]["battery_pct"] = max(0.0, farm_state["drone"]["battery_pct"] - 0.05)
-
-        # Simulate mission progress ticking (remove once real drone is connected)
         if farm_state["drone"]["mission_progress_pct"] < 100:
             farm_state["drone"]["mission_progress_pct"] = min(100.0, farm_state["drone"]["mission_progress_pct"] + 0.2)
 
