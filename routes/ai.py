@@ -1,16 +1,8 @@
 """
 routes/ai.py
 
-The most important security improvement over the prototype.
-In agronet-v4.html the Anthropic API key was called directly from
-the browser — anyone who opened DevTools could steal it.
-
-Here the key lives in .env on the server. The browser sends the
-user's message to /api/ai/chat; we add the live farm context and
-forward to Anthropic. The key never touches the browser.
-
-POST /api/ai/chat       — AI Advisor conversation
-POST /api/ai/crop-plan  — Crop Planner recommendations for a zone
+Anthropic client is created lazily inside each function so a missing
+API key at import time doesn't crash the whole server on startup.
 """
 
 import os
@@ -23,10 +15,15 @@ import anthropic
 from state.farm_state import farm_state
 
 router = APIRouter(prefix="/api/ai", tags=["ai"])
-client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
 
-# ── Build live farm context from farmState ──────────────────────
+def get_client():
+    """Create Anthropic client lazily so missing key doesn't crash startup."""
+    key = os.getenv("ANTHROPIC_API_KEY")
+    if not key:
+        raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY not configured")
+    return anthropic.Anthropic(api_key=key)
+
 
 def build_farm_context() -> str:
     d = farm_state["drone"]
@@ -61,12 +58,10 @@ Weather: {e['air_temp_c']}°C, humidity {e['humidity_pct']}%, wind {e['wind_spee
 7-day: {weather_line}
 
 Soil pH field avg: {farm_state['sensors']['ph'].get('field_avg', '?')}
-CO₂: {e['co2_ppm']} ppm
+CO2: {e['co2_ppm']} ppm
 
-Give specific, actionable advice using this data. Be concise — farmers are busy. Use metric units."""
+Give specific, actionable advice. Be concise. Use metric units."""
 
-
-# ── Request models ──────────────────────────────────────────────
 
 class ChatRequest(BaseModel):
     message: str
@@ -78,10 +73,9 @@ class CropPlanRequest(BaseModel):
     constraints: Optional[str] = None
 
 
-# ── POST /api/ai/chat ───────────────────────────────────────────
-
 @router.post("/chat")
 def ai_chat(body: ChatRequest):
+    client = get_client()
     try:
         response = client.messages.create(
             model="claude-sonnet-4-6",
@@ -90,14 +84,15 @@ def ai_chat(body: ChatRequest):
             messages=[{"role": "user", "content": body.message}],
         )
         return {"reply": response.content[0].text}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"AI service error: {str(e)}")
 
 
-# ── POST /api/ai/crop-plan ──────────────────────────────────────
-
 @router.post("/crop-plan")
 def crop_plan(body: CropPlanRequest):
+    client = get_client()
     zone_data = farm_state["zones"].get(body.zone.upper())
     if not zone_data:
         raise HTTPException(status_code=404, detail="Zone not found")
@@ -111,15 +106,8 @@ Zone: {body.zone}
 Current state: {zone_data['crop']}, health: {zone_data['health']}
 Soil pH: {ph}
 Soil moisture: {moist}%
-Area: 0.4 ha
 Season: {body.season}
 Constraints: {body.constraints or 'none'}
-
-For each crop return:
-- Crop name
-- Expected yield (kg/ha)
-- Planting window
-- 2-sentence agronomic rationale
 
 Return ONLY a JSON array, no other text:
 [{{"crop": "", "yield_kg_ha": 0, "planting_window": "", "rationale": ""}}]"""
@@ -134,6 +122,8 @@ Return ONLY a JSON array, no other text:
         recs = json.loads(raw)
         return {"zone": body.zone, "season": body.season, "recommendations": recs}
     except json.JSONDecodeError:
-        raise HTTPException(status_code=502, detail="AI returned invalid JSON for crop plan")
+        raise HTTPException(status_code=502, detail="AI returned invalid JSON")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"AI service error: {str(e)}")
