@@ -1,8 +1,7 @@
 fastapi==0.111.0
-uvicorn[standard]==0.29.0
-websockets==12.0
+uvicorn[standard]
+anthropic>=0.20.0
 paho-mqtt==1.6.1
-anthropic==0.20.0
-httpx==0.24.1
-python-dotenv==1.0.1
-pydantic==2.7.1
+python-dotenv
+pydantic
+httpx
