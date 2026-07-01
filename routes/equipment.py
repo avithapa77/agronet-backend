@@ -23,17 +23,17 @@ class ServiceBooking(BaseModel):
 def get_equipment():
     return {
         "drone": {
-            "id":               farm_state["drone"]["id"],
-            "flight_hours":     farm_state["drone"]["flight_hours_total"],
-            "battery_pct":      farm_state["drone"]["battery_pct"],
-            "last_service":     farm_state["drone"]["last_service_date"],
-            "next_service":     farm_state["drone"]["next_service_date"],
+            "id":               farm_state["outdoor"]["drones"]["UAV-1"]["id"],
+            "flight_hours":     farm_state["outdoor"]["drones"]["UAV-1"]["flight_hours_total"],
+            "battery_pct":      farm_state["outdoor"]["drones"]["UAV-1"]["battery_pct"],
+            "last_service":     farm_state["outdoor"]["drones"]["UAV-1"]["last_service"],
+            "next_service":     farm_state["outdoor"]["drones"]["UAV-1"]["next_service"],
             "payload_modules":  ["Survey head (multispectral + thermal)", "Spray tank 12 L", "Pollination head"],
         },
         "robot": {
-            "id":        farm_state["robot"]["id"],
-            "op_hours":  farm_state["robot"]["op_hours_total"],
-            "battery_pct": farm_state["robot"]["battery_pct"],
+            "id":        farm_state["outdoor"]["robots"]["MPAR-1"]["id"],
+            "op_hours":  farm_state["outdoor"]["robots"]["MPAR-1"]["op_hours_total"],
+            "battery_pct": farm_state["outdoor"]["robots"]["MPAR-1"]["battery_pct"],
             "tool_heads": ["Harvester head", "Weeder head", "Seeder head"],
         },
     }
@@ -42,7 +42,7 @@ def get_equipment():
 @router.post("/service", status_code=201)
 async def book_service(body: ServiceBooking):
     if body.unit == "UAV-1":
-        farm_state["drone"]["service_booking"] = {"date": body.preferred_date, "status": "booked"}
+        farm_state["outdoor"]["drones"]["UAV-1"]["service_booking"] = {"date": body.preferred_date, "status": "booked"}
 
     print(f"[EQUIPMENT] Service booked for {body.unit} on {body.preferred_date}")
     await manager.broadcast({"type": "SERVICE_BOOKED", "payload": {"unit": body.unit, "date": body.preferred_date}})

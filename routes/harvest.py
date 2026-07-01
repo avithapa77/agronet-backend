@@ -29,13 +29,13 @@ class HarvestSchedule(BaseModel):
 
 @router.get("/")
 def get_harvest_log():
-    return farm_state["harvest_log"]
+    return farm_state["outdoor"]["harvest_log"]
 
 
 @router.get("/today")
 def get_today():
     today_str = date.today().isoformat()
-    today_log = next((d for d in farm_state["harvest_log"] if d["date"] == today_str), None)
+    today_log = next((d for d in farm_state["outdoor"]["harvest_log"] if d["date"] == today_str), None)
     entries   = today_log["entries"] if today_log else []
     total_kg  = sum(e["kg"] for e in entries)
     return {"date": today_str, "entries": entries, "total_kg": total_kg}
@@ -44,10 +44,10 @@ def get_today():
 @router.post("/", status_code=201)
 async def log_harvest(entry: HarvestEntry):
     today_str = date.today().isoformat()
-    day_log   = next((d for d in farm_state["harvest_log"] if d["date"] == today_str), None)
+    day_log   = next((d for d in farm_state["outdoor"]["harvest_log"] if d["date"] == today_str), None)
     if not day_log:
         day_log = {"date": today_str, "entries": []}
-        farm_state["harvest_log"].append(day_log)
+        farm_state["outdoor"]["harvest_log"].append(day_log)
 
     record = {"crop": entry.crop, "kg": entry.kg}
     day_log["entries"].append(record)

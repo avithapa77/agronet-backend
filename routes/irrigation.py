@@ -39,13 +39,13 @@ class RuleToggle(BaseModel):
 
 @router.get("/")
 def get_irrigation():
-    return farm_state["irrigation"]
+    return farm_state["outdoor"]["irrigation"]
 
 
 @router.post("/run")
 async def run_now(body: RunRequest):
     from datetime import date
-    schedule = next((s for s in farm_state["irrigation"]["schedules"] if s["zone"] == body.zone[0].upper()), None)
+    schedule = next((s for s in farm_state["outdoor"]["irrigation"]["schedules"] if s["zone"] == body.zone[0].upper()), None)
     if schedule:
         schedule["last_run"] = date.today().isoformat()
 
@@ -58,7 +58,7 @@ async def run_now(body: RunRequest):
 
 @router.put("/schedule")
 async def update_schedule(body: ScheduleUpdate):
-    schedule = next((s for s in farm_state["irrigation"]["schedules"] if s["zone"] == body.zone), None)
+    schedule = next((s for s in farm_state["outdoor"]["irrigation"]["schedules"] if s["zone"] == body.zone), None)
     if not schedule:
         raise HTTPException(status_code=404, detail="Zone schedule not found")
 
@@ -74,14 +74,14 @@ async def update_schedule(body: ScheduleUpdate):
 @router.post("/rules", status_code=201)
 async def add_rule(body: NewRule):
     rule = {"id": str(uuid.uuid4()), "description": body.description, "enabled": True}
-    farm_state["irrigation"]["rules"].append(rule)
+    farm_state["outdoor"]["irrigation"]["rules"].append(rule)
     await manager.broadcast({"type": "RULE_ADDED", "payload": rule})
     return rule
 
 
 @router.put("/rules/{rule_id}")
 async def toggle_rule(rule_id: str, body: RuleToggle):
-    rule = next((r for r in farm_state["irrigation"]["rules"] if r["id"] == rule_id), None)
+    rule = next((r for r in farm_state["outdoor"]["irrigation"]["rules"] if r["id"] == rule_id), None)
     if not rule:
         raise HTTPException(status_code=404, detail="Rule not found")
     rule["enabled"] = body.enabled

@@ -2,5 +2,6 @@
 .idea/
 .venv/
 secrets.sh
+.DS_Store
 
 

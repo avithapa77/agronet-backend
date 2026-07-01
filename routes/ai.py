@@ -1,12 +1,14 @@
 """
-routes/ai.py — v5
+routes/ai.py — v6
 
-Updated to include all 3 drones + 3 robots + automation state in the farm context
-so Claude gives advice that's aware of the full fleet.
+Claude has full context of both outdoor field and indoor rooms.
+Three endpoints:
+  POST /api/ai/chat              — free-form farming advice
+  POST /api/ai/crop-plan         — zone/room crop recommendations
+  POST /api/ai/suggest-automation — generate automation rules from a plain-English goal
 """
 
-import os
-import json
+import os, json
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
@@ -17,179 +19,170 @@ from state.farm_state import farm_state
 router = APIRouter(prefix="/api/ai", tags=["ai"])
 
 
-def get_client():
+def _client():
     key = os.getenv("ANTHROPIC_API_KEY")
     if not key:
-        raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY not configured")
+        raise HTTPException(500, "ANTHROPIC_API_KEY not configured")
     return anthropic.Anthropic(api_key=key)
 
 
-def build_farm_context() -> str:
-    e = farm_state["environment"]
-
-    alert_lines = "\n".join(
-        f"- {','.join(a['zones'])}: {a['message']} ({a['action']})"
-        for a in farm_state["alerts"]
-    ) or "- No active alerts"
-
-    weather_line = " | ".join(
-        f"{w['day']} {w['temp_c']}°C {w['rain_mm']}mm"
-        for w in farm_state["weather"]
-    )
+def build_context() -> str:
+    out  = farm_state["outdoor"]
+    ind  = farm_state["indoor"]
+    auto = farm_state["automation"]
+    e    = out["environment"]
 
     drone_lines = "\n".join(
-        f"- {did} ({d['name']}): {d['status']}, {d['battery_pct']:.0f}% battery, "
-        f"mode: {d['current_mode']}, task: {d['current_task']}"
-        for did, d in farm_state["drones"].items()
+        f"  {did} ({d['name']}): {d['status']}, {d['battery_pct']:.0f}% bat, {d['current_task']}"
+        for did, d in out["drones"].items()
     )
-
     robot_lines = "\n".join(
-        f"- {rid} ({r['name']}): {r['status']}, {r['battery_pct']}% battery, "
-        f"head: {r['current_head']}, task: {r['current_task']}"
-        for rid, r in farm_state["robots"].items()
+        f"  {rid} ({r['name']}): {r['status']}, head={r['current_head']}, {r['current_task']}"
+        for rid, r in out["robots"].items()
     )
+    room_lines = "\n".join(
+        f"  {rid} ({r['name']}): temp={r['readings']['temp_c']}°C "
+        f"RH={r['readings']['humidity_pct']}% CO₂={r['readings']['co2_ppm']}ppm "
+        f"pH={r['readings']['ph']} EC={r['readings']['ec_ms']}ms/cm VPD={r['readings']['vpd_kpa']}kPa"
+        for rid, r in ind["rooms"].items()
+    )
+    alert_lines = "\n".join(
+        f"  [{a['severity'].upper()}] {','.join(a['zones'])}: {a['message']}"
+        for a in farm_state["alerts"]
+    ) or "  None"
+    rule_names = ", ".join(r["name"] for r in auto["rules"] if r["enabled"])
+    recent_log = "\n".join(
+        f"  {e['time']} [{e['env']}] {e['name']}: {e['message']}"
+        for e in auto["action_log"][-5:]
+    ) or "  None"
 
-    auto = farm_state["automation"]
-    active_rules = [r["name"] for r in auto["rules"] if r["enabled"]]
-    recent_auto  = auto["action_log"][-3:] if auto["action_log"] else []
-    auto_log_str = "\n".join(f"  {e['time']} [{e['name']}]: {e['message']}" for e in recent_auto)
+    return f"""You are AgroNet AI — expert advisor for an autonomous farm with OUTDOOR fields and INDOOR greenhouses/vertical farm.
 
-    return f"""You are AgroNet AI, an expert precision-farming advisor with live access to a smart farm.
-
-FLEET STATUS:
-Drones (3 total):
+OUTDOOR FLEET:
+Drones:
 {drone_lines}
-
-Robots (3 total):
+Ground robots:
 {robot_lines}
+
+OUTDOOR SENSORS (critical zones):
+- C5 soil moisture: {out['sensors']['soil_moisture'].get('C5','?')}% (alert <45%)
+- A4 nitrogen: {out['sensors']['nitrogen'].get('A4','?')} ppm (alert <50 ppm)
+- B3/B4 pest traps: {out['sensors']['pest_traps'].get('B3','?')}/day (alert >30)
+- B3/B4 leaf wetness: {out['sensors']['leaf_wetness'].get('B3','?')} (alert >0.8)
+
+OUTDOOR ENVIRONMENT:
+Temp {e['air_temp_c']}°C | Humidity {e['humidity_pct']}% | Wind {e['wind_speed_kmh']} km/h {e['wind_dir_label']}
+Rain today {e['rainfall_mm_today']}mm | UV {e.get('uv_index','?')} | Soil temp {e['soil_temp_c']}°C
+
+INDOOR ROOMS:
+{room_lines}
 
 ACTIVE ALERTS:
 {alert_lines}
 
-KEY ZONE SENSORS:
-- Zone A4: nitrogen {farm_state['sensors']['nitrogen'].get('A4', '?')} ppm (threshold: 50 ppm)
-- Zone C5: soil moisture {farm_state['sensors']['soil_moisture'].get('C5', '?')}% (threshold: 45%)
-- Zone D6: empty, pH {farm_state['sensors']['ph'].get('D6', '?')}, 0.4 ha ready to plant
-- Zone B3/B4: pest trap {farm_state['sensors']['pest_traps'].get('B3', '?')}/day (threshold: 30)
+AUTOMATION ENGINE: {'ON' if auto['enabled'] else 'OFF'} | Mode: {auto['mode']}
+Active rules: {rule_names}
+Recent actions:
+{recent_log}
 
-ENVIRONMENT:
-Temperature: {e['air_temp_c']}°C, Humidity: {e['humidity_pct']}%, 
-Wind: {e['wind_speed_kmh']} km/h {e['wind_dir_label']}, Rainfall today: {e['rainfall_mm_today']} mm
+You can advise on:
+- Which drones/robots to dispatch and when
+- Indoor climate adjustments (HVAC, CO₂, LED, nutrients, pH, EC, VPD)
+- Crop planning for any zone or room
+- New automation rules (give as JSON)
+- Pest/disease diagnosis and treatment
+- Harvest timing and yield optimization
 
-7-DAY WEATHER: {weather_line}
-
-AUTOMATION ENGINE: {'ENABLED' if auto['enabled'] else 'DISABLED'}
-Active rules: {', '.join(active_rules)}
-Recent auto-actions:
-{auto_log_str or '  None today'}
-
-Field avg soil pH: {farm_state['sensors']['ph'].get('field_avg', '?')}
-
-Respond with specific, actionable advice. Reference which drone/robot to use by ID.
-Use metric units. Be concise."""
+Be specific. Reference equipment by ID. Use metric units."""
 
 
 class ChatRequest(BaseModel):
     message: str
 
-
 class CropPlanRequest(BaseModel):
-    zone: str
+    location: str        # zone ID like "A1" or room ID like "GH-1"
     season: str
     constraints: Optional[str] = None
 
-
-class AutomationSuggestRequest(BaseModel):
-    goal: str   # e.g. "reduce water usage by 20%"
+class AutoSuggestRequest(BaseModel):
+    goal: str
 
 
 @router.post("/chat")
 def ai_chat(body: ChatRequest):
-    client = get_client()
+    client = _client()
     try:
-        response = client.messages.create(
+        resp = client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=1000,
-            system=build_farm_context(),
-            messages=[{"role": "user", "content": body.message}],
+            system=build_context(),
+            messages=[{"role":"user","content":body.message}],
         )
-        return {"reply": response.content[0].text}
+        return {"reply": resp.content[0].text}
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"AI service error: {str(e)}")
+        raise HTTPException(502, f"AI error: {e}")
 
 
 @router.post("/crop-plan")
 def crop_plan(body: CropPlanRequest):
-    client = get_client()
-    zone_data = farm_state["zones"].get(body.zone.upper())
-    if not zone_data:
-        raise HTTPException(status_code=404, detail="Zone not found")
+    client = _client()
+    loc = body.location.upper()
+    # Determine if outdoor zone or indoor room
+    if loc in farm_state["outdoor"]["zones"]:
+        zone = farm_state["outdoor"]["zones"][loc]
+        context = f"Outdoor zone {loc}: crop={zone['crop']}, health={zone['health']}, moisture={zone['moisture']}%, pH={farm_state['outdoor']['sensors']['ph'].get(loc, farm_state['outdoor']['sensors']['ph']['field_avg'])}"
+    elif loc in farm_state["indoor"]["rooms"]:
+        room = farm_state["indoor"]["rooms"][loc]
+        context = f"Indoor room {loc} ({room['type']}): current crop={room['crop']}, stage={room['stage']}, area={room.get('area_m2','?')}m²"
+    else:
+        raise HTTPException(404, f"Location {loc} not found")
 
-    ph    = farm_state["sensors"]["ph"].get(body.zone.upper(), farm_state["sensors"]["ph"].get("field_avg", "?"))
-    moist = zone_data.get("moisture", "unknown")
-
-    prompt = f"""Recommend 3 crops for this zone.
-
-Zone: {body.zone}
-Current: {zone_data['crop']}, health: {zone_data['health']}
-Soil pH: {ph}, Moisture: {moist}%
+    prompt = f"""{context}
 Season: {body.season}
 Constraints: {body.constraints or 'none'}
 
-Return ONLY a JSON array:
-[{{"crop": "", "yield_kg_ha": 0, "planting_window": "", "rationale": ""}}]"""
+Recommend 3 crops. Return ONLY a JSON array:
+[{{"crop":"","yield_kg_ha":0,"planting_window":"","rationale":""}}]"""
 
     try:
-        response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=1000,
-            messages=[{"role": "user", "content": prompt}],
+        resp = client.messages.create(
+            model="claude-sonnet-4-6", max_tokens=1000,
+            messages=[{"role":"user","content":prompt}],
         )
-        raw  = response.content[0].text.strip()
-        recs = json.loads(raw)
-        return {"zone": body.zone, "season": body.season, "recommendations": recs}
+        return {"location": loc, "recommendations": json.loads(resp.content[0].text.strip())}
     except json.JSONDecodeError:
-        raise HTTPException(status_code=502, detail="AI returned invalid JSON")
-    except HTTPException:
-        raise
+        raise HTTPException(502, "AI returned invalid JSON")
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"AI service error: {str(e)}")
+        raise HTTPException(502, f"AI error: {e}")
 
 
 @router.post("/suggest-automation")
-def suggest_automation(body: AutomationSuggestRequest):
-    """Ask Claude to suggest automation rules in JSON format for a given goal."""
-    client = get_client()
-    prompt = f"""You are an automation rule designer for a precision farm with this equipment:
-- 3 drones: UAV-1 (survey+spray+pollination), UAV-2 (heavy spray), UAV-3 (pollination)
-- 3 robots: MPAR-1 (harvester), MPAR-2 (weeder+soil-probe), MPAR-3 (drip-irrigator+fertigation)
-- Sensors: soil_moisture, nitrogen, phosphorus, potassium, ph, compaction, pest_traps
-- Environment: air_temp_c, humidity_pct, wind_speed_kmh, rainfall_mm_today
+def suggest_automation(body: AutoSuggestRequest):
+    client = _client()
+    prompt = f"""Design 2-3 automation rules for this goal: "{body.goal}"
 
-Farmer's goal: {body.goal}
+Farm equipment:
+OUTDOOR: UAV-1(survey/spray/pollination), UAV-2(spray), UAV-3(pollination), MPAR-1(harvester), MPAR-2(weeder/soil-probe), MPAR-3(drip/fertigation)
+INDOOR: RAIL-1(harvest/transplant VF-1), SPRAY-BOT-1(foliar/prune GH-1), DOSER-1(nutrients/pH/EC all rooms)
+Outdoor sensors: soil_moisture, nitrogen, pest_traps, leaf_wetness, ph, compaction
+Indoor sensors (per room): temp_c, humidity_pct, co2_ppm, vpd_kpa, ph, ec_ms
+Trigger types: sensor, weather, fleet, schedule, compound, indoor_sensor, indoor_multi
+Action types: dispatch_drone, dispatch_robot, indoor_actuator, indoor_robot, night_mode, lights_on, vpd_correction
 
-Design 2–3 automation rules as JSON. Return ONLY a JSON array:
-[{{
-  "name": "",
-  "description": "",
-  "trigger": {{"type": "sensor|weather|fleet|schedule|compound", "sensor": "", "operator": "<|>|==", "threshold": 0}},
-  "action": {{"type": "dispatch_drone|dispatch_robot|cancel_spray_missions|return_to_dock", "drone": "UAV-1|UAV-2|UAV-3", "mode": "", "payload": ""}}
-}}]"""
+Return ONLY a JSON array of rules. Each rule needs: name, description, env (outdoor/indoor), trigger(dict), action(dict)."""
 
     try:
-        response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=1500,
-            messages=[{"role": "user", "content": prompt}],
+        resp = client.messages.create(
+            model="claude-sonnet-4-6", max_tokens=1500,
+            messages=[{"role":"user","content":prompt}],
         )
-        raw   = response.content[0].text.strip()
-        rules = json.loads(raw)
-        return {"goal": body.goal, "suggested_rules": rules}
+        raw = resp.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = "\n".join(raw.split("\n")[1:-1])
+        return {"goal": body.goal, "suggested_rules": json.loads(raw)}
     except json.JSONDecodeError:
-        raise HTTPException(status_code=502, detail="AI returned invalid JSON")
-    except HTTPException:
-        raise
+        raise HTTPException(502, "AI returned invalid JSON")
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"AI service error: {str(e)}")
+        raise HTTPException(502, f"AI error: {e}")
